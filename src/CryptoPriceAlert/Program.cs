@@ -1,54 +1,64 @@
-﻿using DotNetEnv;
-using Microsoft.Extensions.DependencyInjection;
+﻿using CryptoPriceAlert.Configuration;
+using DotNetEnv;
+using Microsoft.Extensions.Options;
 using Newtonsoft.Json.Linq;
 
-namespace CryptoPriceAlert;
+var builder = WebApplication.CreateBuilder(args);
 
-public abstract class Program
+Env.Load();
+
+builder.Configuration.AddEnvironmentVariables();
+
+builder.Services.AddOptions<ApplicationOptions>().Bind(builder.Configuration).ValidateDataAnnotations();
+
+builder.Services.AddHttpClient<ICoinGeckoService, CoinGeckoService>((serviceProvider, client) =>
 {
-    public static async Task Main(string[] args)
+    var options = serviceProvider.GetRequiredService<IOptions<ApplicationOptions>>().Value;
+    client.BaseAddress = new Uri(options.BaseUrl);
+    client.DefaultRequestHeaders.Add("x-cg-demo-api-key", options.ApiKey);
+});
+
+var app = builder.Build();
+
+app.MapGet("/price/{cryptoId}", async (string cryptoId, ICoinGeckoService cryptoService) =>
+{
+    try
     {
-        Env.Load();
-        var apiKey = Environment.GetEnvironmentVariable("API_KEY");
+        var price = await cryptoService.GetPriceAsync(cryptoId);
 
-        if (string.IsNullOrEmpty(apiKey))
+        return Results.Ok(new
         {
-            Console.WriteLine("Error: API_KEY not found in .env file.");
-            return;
-        }
+            id = cryptoId,
+            price_usd = price,
+            timestamp = DateTime.UtcNow
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
 
-        var serviceProvider = new ServiceCollection()
-            .AddHttpClient("CoinGecko", client =>
-            {
-                client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/");
-                client.DefaultRequestHeaders.Add("vs_currencies", "usd");
-                client.DefaultRequestHeaders.Add("ids", "bitcoin");
-                client.DefaultRequestHeaders.Add("x-cg-demo-api-key", apiKey);
-            })
-            .Services
-            .BuildServiceProvider();
+app.Run();
 
-        var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+internal interface ICoinGeckoService
+{
+    Task<decimal> GetPriceAsync(string cryptoId);
+}
 
-        try
-        {
-            Console.WriteLine("Fetching Bitcoin price...");
-            var price = await GetCryptoPriceAsync(httpClientFactory, "bitcoin");
-            Console.WriteLine($"Current Bitcoin Price: ${price}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Operation failed: {ex.Message}");
-        }
+internal class CoinGeckoService : ICoinGeckoService
+{
+    private readonly HttpClient _httpClient;
+
+    public CoinGeckoService(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
     }
 
-    private static async Task<decimal> GetCryptoPriceAsync(IHttpClientFactory factory, string cryptoId)
+    public async Task<decimal> GetPriceAsync(string cryptoId)
     {
-        var client = factory.CreateClient("CoinGecko");
-
         var url = $"simple/price?ids={cryptoId}&vs_currencies=usd";
-
-        var response = await client.GetAsync(url);
+        var response = await _httpClient.GetAsync(url);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -58,7 +68,6 @@ public abstract class Program
 
         var responseBody = await response.Content.ReadAsStringAsync();
         var json = JObject.Parse(responseBody);
-
         var priceToken = json[cryptoId]?["usd"];
 
         return priceToken?.Value<decimal>() ??
